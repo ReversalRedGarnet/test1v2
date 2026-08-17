@@ -5,9 +5,26 @@ time complexity, Big O order, and the Java programming material.
 
 Built from the Week 1–3 lecture notes, the Week 2 and Week 3 lab tutorials, and Sample Test I.
 
+It assumes you are coming back to this cold. Every lesson page opens with a plain-English
+summary and a short numbered ladder before the lecture wording starts, every technical word
+is clickable for a one-line definition, and the lecture detail underneath is folded into
+panels you open one at a time.
+
+## Coming back to it after a while
+
+- **Dotted words are clickable.** The first time a term appears on a page it gets a dotted
+  underline; click or tap for a definition, an example, and a link to the page that teaches it.
+  All of them are on the **Glossary** page, which is searchable and filterable by area.
+- **Guided vs Full.** The button in the top bar toggles the reading mode. *Guided* (the default)
+  folds each page's lecture content into collapsible panels, one per heading, with the number of
+  activities shown on each. *Full* opens everything — better for a last-minute skim. The choice
+  is remembered and survives Reset.
+- **Start at "How to use this."** It now carries a suggested route through the material for
+  someone starting from nothing.
+
 ## What's in it
 
-**15 pages**, 51 activities, 60 quiz questions.
+**16 pages**, 51 activities, 60 quiz questions.
 
 | Page | Covers |
 |---|---|
@@ -25,6 +42,7 @@ Built from the Week 1–3 lecture notes, the Week 2 and Week 3 lab tutorials, an
 | Quiz | 10 random questions per set, filterable by topic |
 | Sample Test I | All four questions, worked through |
 | Cheat sheet | Every formula and rule on one page |
+| Glossary | Every technical term on the site, one line each, searchable |
 
 ### The six labs
 
@@ -51,10 +69,15 @@ index.html
 README.md
 css/style.css
 js/data.js
+js/glossary.js
+js/primer.js
 js/practice.js
 js/widgets.js
 js/app.js
 ```
+
+The scripts must stay in that order in `index.html`: `data.js` and `glossary.js` and `primer.js`
+all define content that `app.js` reads at boot.
 
 To upload through the web interface: on the repo page choose **Add file → Upload files**, then drag
 the whole folder in. GitHub preserves the `css/` and `js/` subfolders. If drag-and-drop misses
@@ -77,11 +100,28 @@ name it `.nojekyll`, and leave it empty.
 
 ## Editing it
 
-Content lives in two files and needs no tooling:
+Content lives in four files and needs no tooling:
 
 - `js/data.js` — every lesson page, as a list of blocks (`p`, `h`, `code`, `note`, `table`,
   `formula`, `mcq`, `fill`, `reveal`, `order`, `pairs`, `widget`).
+- `js/primer.js` — the plain-English run-up shown above each page, plus any extra pages.
+  Two block types live only here: `plain` (the blue summary box) and `steps` (the numbered
+  ladder). Set `fold: true` on a page to have its `data.js` content folded in Guided mode.
+- `js/glossary.js` — the tooltip and glossary terms.
 - `js/practice.js` — the quiz bank and the exercise set.
+
+To add a glossary term, append an object to `GLOSSARY`:
+
+```js
+{ w:'downcasting', alt:['downcast'], c:'java', see:'#/java-poly',
+  d:'One-sentence definition. **bold** and `code` work.',
+  ex:'Optional example line.' }
+```
+
+`c` is the category (`java`, `ds`, `analysis`). `alt` lists other spellings that should also
+trigger the tooltip. Add `kw:true` for bare Java keywords like `this` or `final` — those only
+get a tooltip when they appear inside backticks, so the ordinary English words are left alone.
+Only the **first** mention of a term on a page is marked, capped at 30 per page.
 
 To add a quiz question, append an object to `QUIZ_BANK`:
 
@@ -102,3 +142,12 @@ accepted answers for each:
 ```
 
 Activity ids must be unique across the whole site — they are the keys used for progress tracking.
+
+To add a primer to a page, key it by the section id from `data.js`:
+
+```js
+'bigo': { fold:true, blocks:[
+  { t:'plain', title:'In plain English', x:'…' },
+  { t:'steps', title:'Build it up', x:[ {h:'First rung', p:'…'}, {h:'Second rung', p:'…'} ] }
+]}
+```

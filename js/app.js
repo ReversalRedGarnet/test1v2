@@ -2,6 +2,12 @@
    CS214 Revise — router, renderer, activities, progress
    ============================================================ */
 
+/* ---------- pull in the extra pages defined in primer.js ---------- */
+if (typeof EXTRA_SECTIONS !== 'undefined'){
+  EXTRA_SECTIONS.forEach(s => { if (!SECTIONS.some(x => x.id === s.id)) SECTIONS.push(s); });
+}
+const PRIMER_OF = (typeof PRIMERS !== 'undefined') ? PRIMERS : {};
+
 /* ---------- storage that never throws ---------- */
 const Store = (function(){
   let ok = true, mem = {};
@@ -38,7 +44,9 @@ function saveAnswer(id, val){ ANSWERS[id] = val; Store.set('cs214.answers', ANSW
 /* ---------- activity census ---------- */
 const ACTIVITY_TYPES = {mcq:1, fill:1, reveal:1, order:1, pairs:1};
 function activityIds(section){
-  return (section.blocks || []).filter(b => ACTIVITY_TYPES[b.t] && b.id).map(b => b.id);
+  const primer = (PRIMER_OF[section.id] && PRIMER_OF[section.id].blocks) || [];
+  return primer.concat(section.blocks || [])
+    .filter(b => ACTIVITY_TYPES[b.t] && b.id).map(b => b.id);
 }
 const ALL_ACTIVITIES = SECTIONS.reduce((a,s) => a.concat(activityIds(s)), []);
 
@@ -99,6 +107,156 @@ function highlight(src, lang){
 function norm(s){ return String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g,' '); }
 
 /* ============================================================
+   Reading mode — 'guided' folds the lecture content into panels,
+   'full' shows every panel open.
+   ============================================================ */
+let MODE = Store.get('cs214.mode', 'guided');
+function setMode(m){ MODE = m; Store.set('cs214.mode', m); paintModeBtn(); route(); }
+function paintModeBtn(){
+  const btn = document.getElementById('modeBtn');
+  if (!btn) return;
+  btn.textContent = MODE === 'guided' ? 'Guided' : 'Full';
+  btn.title = MODE === 'guided'
+    ? 'Guided: lecture detail is folded into panels. Click for the full page.'
+    : 'Full: everything open. Click to fold it back down.';
+  btn.setAttribute('aria-pressed', MODE === 'guided' ? 'true' : 'false');
+}
+
+/* ============================================================
+   Glossary: first mention of a term on a page becomes a tooltip
+   ============================================================ */
+const GLOSS = (typeof GLOSSARY !== 'undefined') ? GLOSSARY : [];
+const GLOSS_BY_KEY = Object.create(null);
+let GLOSS_RE = null;
+
+function glossSlug(w){ return String(w).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); }
+
+(function buildGlossIndex(){
+  const keys = [];
+  GLOSS.forEach(e => {
+    e.slug = glossSlug(e.w);
+    [e.w].concat(e.alt || []).forEach(k => {
+      const lk = k.toLowerCase();
+      if (!GLOSS_BY_KEY[lk]){ GLOSS_BY_KEY[lk] = e; keys.push(k); }
+    });
+  });
+  if (!keys.length) return;
+  keys.sort((a,b) => b.length - a.length);           // longest first: "abstract class" beats "class"
+  const src = keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|');
+  GLOSS_RE = new RegExp('(' + src + ')', 'gi');
+})();
+
+const GLOSS_SKIP = {PRE:1, A:1, BUTTON:1, SELECT:1, TEXTAREA:1, INPUT:1, SCRIPT:1, STYLE:1, H1:1, SUMMARY:1, LABEL:1, OPTION:1};
+function isWordChar(ch){ return !!ch && /[A-Za-z0-9_]/.test(ch); }
+
+const GLOSS_MAX_PER_PAGE = 30;
+function annotateGlossary(root){
+  if (!root || !GLOSS_RE) return;
+  const used = Object.create(null);
+  let placed = 0;
+  const texts = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node){
+      if (!node.nodeValue || !/[A-Za-z]/.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+      let p = node.parentNode;
+      while (p && p !== root){
+        if (GLOSS_SKIP[p.nodeName]) return NodeFilter.FILTER_REJECT;
+        if (p.classList && (p.classList.contains('no-gloss') || p.classList.contains('gterm'))) return NodeFilter.FILTER_REJECT;
+        p = p.parentNode;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  }, false);
+  let n; while ((n = walker.nextNode())) texts.push(n);
+
+  texts.forEach(node => {
+    if (placed >= GLOSS_MAX_PER_PAGE) return;
+    const inCode = node.parentNode && node.parentNode.nodeName === 'CODE';
+    const text = node.nodeValue;
+    GLOSS_RE.lastIndex = 0;
+    let m, last = 0, frag = null;
+    while ((m = GLOSS_RE.exec(text)) !== null){
+      const hit = m[0], start = m.index, end = start + hit.length;
+      const entry = GLOSS_BY_KEY[hit.toLowerCase()];
+      if (!entry || used[entry.slug]) continue;
+      if (entry.kw && !inCode) continue;        // bare Java keywords only inside `code`
+      if (placed >= GLOSS_MAX_PER_PAGE) break;
+      // require real word boundaries when the term begins/ends with a word character
+      if (isWordChar(hit[0]) && isWordChar(text[start-1])) continue;
+      if (isWordChar(hit[hit.length-1]) && isWordChar(text[end])) continue;
+      used[entry.slug] = true; placed++;
+      frag = frag || document.createDocumentFragment();
+      if (start > last) frag.appendChild(document.createTextNode(text.slice(last, start)));
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'gterm';
+      btn.textContent = hit;
+      btn.setAttribute('data-term', entry.slug);
+      btn.setAttribute('aria-label', hit + ' — show definition');
+      frag.appendChild(btn);
+      last = end;
+    }
+    if (frag){
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+  });
+}
+
+/* ---------- the popover ---------- */
+let TIP = null, TIP_FOR = null;
+function tipEl(){
+  if (TIP) return TIP;
+  TIP = el('div', {class:'gtip', role:'dialog'});
+  TIP.addEventListener('click', e => e.stopPropagation());
+  document.body.appendChild(TIP);
+  return TIP;
+}
+function hideTip(){
+  if (TIP) TIP.classList.remove('show');
+  if (TIP_FOR) TIP_FOR.classList.remove('open');
+  TIP_FOR = null;
+}
+function showTip(btn){
+  const entry = GLOSS.find(e => e.slug === btn.getAttribute('data-term'));
+  if (!entry) return;
+  if (TIP_FOR === btn){ hideTip(); return; }
+  hideTip();
+  const t = tipEl();
+  t.innerHTML = '';
+  t.appendChild(el('div', {class:'gtip-word no-gloss', text: entry.w}));
+  t.appendChild(el('div', {class:'gtip-def no-gloss', html: md(entry.d)}));
+  if (entry.ex) t.appendChild(el('div', {class:'gtip-ex no-gloss', html: md(entry.ex)}));
+  const foot = el('div', {class:'gtip-foot'});
+  if (entry.see) foot.appendChild(el('a', {href: entry.see, text:'Where it is taught'}));
+  foot.appendChild(el('a', {href:'#/glossary', text:'All terms'}));
+  t.appendChild(foot);
+
+  t.classList.add('show');
+  TIP_FOR = btn; btn.classList.add('open');
+
+  const r = btn.getBoundingClientRect();
+  const w = Math.min(330, window.innerWidth - 20);
+  t.style.width = w + 'px';
+  let left = r.left + r.width/2 - w/2;
+  left = Math.max(10, Math.min(left, window.innerWidth - w - 10));
+  const h = t.offsetHeight;
+  let top = r.bottom + window.scrollY + 8;
+  if (r.bottom + h + 16 > window.innerHeight && r.top - h - 8 > 0) top = r.top + window.scrollY - h - 8;
+  t.style.left = left + 'px';
+  t.style.top  = top + 'px';
+}
+
+document.addEventListener('click', e => {
+  const btn = e.target.closest ? e.target.closest('.gterm') : null;
+  if (btn){ e.preventDefault(); e.stopPropagation(); showTip(btn); return; }
+  hideTip();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideTip(); });
+window.addEventListener('resize', hideTip);
+window.addEventListener('hashchange', hideTip);
+
+/* ============================================================
    Block renderers
    ============================================================ */
 const R = {};
@@ -140,6 +298,76 @@ R.cards = b => el('div', {class:'cards'}, b.x.map(c =>
     el('p', {text:c.p})
   ])
 ));
+
+/* ---------- plain-English summary box ---------- */
+R.plain = b => el('div', {class:'plainbox'}, [
+  el('div', {class:'plainbox-title no-gloss', text: b.title || 'In plain English'}),
+  el('div', {html: md(b.x)})
+]);
+
+/* ---------- numbered ladder ---------- */
+R.steps = b => {
+  const kids = [];
+  if (b.title) kids.push(el('div', {class:'ladder-title no-gloss', text:b.title}));
+  const ol = el('ol', {class:'ladder'});
+  (b.x || []).forEach(s => ol.appendChild(el('li', {}, [
+    el('strong', {html: md(s.h)}),
+    el('div', {html: md(s.p)})
+  ])));
+  kids.push(ol);
+  return el('div', {}, kids);
+};
+
+/* ---------- the glossary page ---------- */
+R.glossary = () => {
+  const wrap = el('div', {class:'no-gloss'});
+  const cats = [
+    ['all',      'Everything'],
+    ['java',     'Java & objects'],
+    ['ds',       'Data structures'],
+    ['analysis', 'Efficiency & Big O']
+  ];
+  const search = el('input', {type:'search', class:'gsearch', placeholder:'Type a word\u2026', 'aria-label':'Search the glossary'});
+  const tabs = el('div', {class:'gtabs'});
+  const list = el('div', {class:'glist'});
+  let cat = 'all';
+
+  cats.forEach(([id,label]) => {
+    const t = el('button', {class:'gtab' + (id === 'all' ? ' on' : ''), type:'button', text:label});
+    t.addEventListener('click', () => {
+      cat = id;
+      [...tabs.children].forEach(c => c.classList.remove('on'));
+      t.classList.add('on');
+      paint();
+    });
+    tabs.appendChild(t);
+  });
+
+  function paint(){
+    const q = norm(search.value);
+    list.innerHTML = '';
+    const rows = GLOSS.filter(e =>
+      (cat === 'all' || e.c === cat) &&
+      (!q || norm(e.w).indexOf(q) >= 0 || (e.alt||[]).some(a => norm(a).indexOf(q) >= 0) || norm(e.d).indexOf(q) >= 0));
+    if (!rows.length){ list.appendChild(el('p', {class:'muted', text:'Nothing matches that.'})); return; }
+    rows.slice().sort((a,b) => a.w.toLowerCase() < b.w.toLowerCase() ? -1 : 1).forEach(e => {
+      const kids = [
+        el('div', {class:'gentry-word'}, [ el('span', {text:e.w}) ]),
+        el('div', {html: md(e.d)})
+      ];
+      if (e.ex)  kids.push(el('div', {class:'gentry-ex', html: md(e.ex)}));
+      if (e.see) kids.push(el('a', {class:'gentry-see', href:e.see, text:'Where it is taught \u2192'}));
+      list.appendChild(el('div', {class:'gentry', id:'g-' + e.slug}, kids));
+    });
+  }
+
+  search.addEventListener('input', paint);
+  wrap.appendChild(el('div', {class:'gbar'}, [search]));
+  wrap.appendChild(tabs);
+  wrap.appendChild(list);
+  paint();
+  return wrap;
+};
 
 R.widget = b => {
   const host = el('div');
@@ -482,6 +710,7 @@ R.quiz = () => {
       body.appendChild(fb);
       qArea.appendChild(box);
     });
+    annotateGlossary(qArea);
   }
 
   function finish(){
@@ -526,19 +755,77 @@ function buildNav(){
   });
 }
 
+function renderBlock(host, b){
+  const fn = R[b.t];
+  if (!fn) return;
+  try { host.appendChild(fn(b)); }
+  catch(e){ console.error('block failed', b, e); }
+}
+
+/* split a block list into groups that each start at an `h` heading */
+function headingGroups(blocks){
+  const groups = [];
+  let cur = null;
+  blocks.forEach(b => {
+    if (b.t === 'h' || !cur){
+      cur = { title: b.t === 'h' ? b.x : 'Overview', blocks: [] };
+      groups.push(cur);
+      if (b.t === 'h') return;
+    }
+    cur.blocks.push(b);
+  });
+  return groups.filter(g => g.blocks.length);
+}
+
+function renderFolded(page, blocks){
+  const groups = headingGroups(blocks);
+  const bar = el('div', {class:'foldbar'}, [
+    el('span', {class:'foldbar-note no-gloss', text: groups.length + ' sections \u00b7 open them one at a time, or\u2026'})
+  ]);
+  const openAll = el('button', {class:'btn sec', type:'button', text:'Open all of them'});
+  bar.appendChild(openAll);
+  page.appendChild(bar);
+
+  const panels = [];
+  groups.forEach((g,i) => {
+    const nActs = g.blocks.filter(b => ACTIVITY_TYPES[b.t]).length;
+    const body = el('div', {class:'fold-body'});
+    g.blocks.forEach(b => renderBlock(body, b));
+    const sum = el('summary', {}, [
+      el('span', {class:'fold-title', html: md(g.title)}),
+      nActs ? el('span', {class:'fold-count', text: nActs + (nActs === 1 ? ' activity' : ' activities')}) : el('span')
+    ]);
+    const d = el('details', {class:'fold'}, [sum, body]);
+    if (i === 0) d.open = true;
+    panels.push(d);
+    page.appendChild(d);
+  });
+
+  openAll.addEventListener('click', () => {
+    const anyClosed = panels.some(p => !p.open);
+    panels.forEach(p => p.open = anyClosed);
+    openAll.textContent = anyClosed ? 'Close them again' : 'Open all of them';
+  });
+}
+
 function renderSection(sec){
   const page = document.getElementById('page');
   page.innerHTML = '';
-  if (sec.eyebrow) page.appendChild(el('p', {class:'eyebrow', text:sec.eyebrow}));
+  if (sec.eyebrow) page.appendChild(el('p', {class:'eyebrow no-gloss', text:sec.eyebrow}));
   page.appendChild(el('h1', {text:sec.title}));
   if (sec.lede) page.appendChild(el('p', {class:'lede', html: md(sec.lede)}));
 
-  (sec.blocks || []).forEach(b => {
-    const fn = R[b.t];
-    if (!fn) return;
-    try { page.appendChild(fn(b)); }
-    catch(e){ console.error('block failed', b, e); }
-  });
+  const primer = PRIMER_OF[sec.id];
+  if (primer && primer.blocks) primer.blocks.forEach(b => renderBlock(page, b));
+
+  const blocks = sec.blocks || [];
+  if (primer && primer.fold && MODE === 'guided' && blocks.length){
+    renderFolded(page, blocks);
+  } else {
+    blocks.forEach(b => renderBlock(page, b));
+  }
+
+  if (sec.id !== 'glossary') annotateGlossary(page);
 
   // pager
   const pager = document.getElementById('pager');
@@ -582,7 +869,11 @@ function route(){
 document.addEventListener('DOMContentLoaded', () => {
   buildNav();
   window.addEventListener('hashchange', route);
+  paintModeBtn();
   route();
+
+  const modeBtn = document.getElementById('modeBtn');
+  if (modeBtn) modeBtn.addEventListener('click', () => setMode(MODE === 'guided' ? 'full' : 'guided'));
 
   const toggle = document.getElementById('navToggle');
   toggle.addEventListener('click', () => {
